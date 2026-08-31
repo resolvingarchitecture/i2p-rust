@@ -1,0 +1,29 @@
+[package]
+name = "i2p_client"
+version = "0.3.0"
+authors = ["Brian Taylor <brian@resolvingarchitecture.io>"]
+license = "MIT"
+edition = "2021"
+description = "An I2P client for 1M5: SAMv3 to a local router, or an embedded pure-Rust router via emissary"
+homepage = "https://resolvingarchitecture.io"
+repository = "https://github.com/resolvingarchitecture/i2p-rust"
+readme = "README.md"
+keywords = ["i2p", "sam", "privacy", "anonymity"]
+categories = ["network-programming"]
+
+[dependencies]
+log = "0.4"
+seda_bus = { path = "../seda-bus-rust" }
+
+# --- embedded router (feature "embedded") ---
+# emissary is a pure-Rust I2P router. Heavy (tokio, reqwest/rustls, dalek);
+# off by default. Pinned to a reviewed commit; bump deliberately.
+emissary-core = { git = "https://github.com/eepnet/emissary", rev = "9b43484", optional = true }
+emissary-util = { git = "https://github.com/eepnet/emissary", rev = "9b43484", default-features = false, features = ["tokio", "rustls"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"], optional = true }
+
+[features]
+default = []
+embedded = ["dep:emissary-core", "dep:emissary-util", "dep:tokio"]
+
+[dev-dependencies]
