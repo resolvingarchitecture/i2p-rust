@@ -1,9 +1,20 @@
 # i2p-client (Rust) — TODO
 
+## P0 — auto backend switching (done)
+- [x] `active` backend tracking + runtime `local`↔`embedded` switch in `auto`
+      mode (rate-limited local SAM re-probe in `send()`), matching
+      `tor-client-rust`.
+- [x] Idempotent `start_embedded()`; keep the embedded router warm across flaps.
+- [ ] Field-test the switch: kill/restart a local router under load, confirm
+      the session moves and this node's destination stays stable.
+- [ ] Also re-probe from `receive()` (or a low-rate ticker) so a long-idle
+      sender still recovers without an outbound send.
+
 ## P1 — datagram path hardening
 - [ ] Field-test `local` mode against a live I2P / i2pd router.
 - [ ] Handle SAM async status lines (session dropped, router restart) — reader
-      thread on the control socket updating `Status`.
+      thread on the control socket updating `Status` (a more precise switch
+      trigger than the port probe).
 - [ ] Reconnect / re-establish the session on drop (i2p-java's `restart()`).
 - [ ] Chunk payloads above the SAM datagram limit, or reject with a clear error.
 - [ ] Surface `Blocked` / `PortConflict` from real router conditions, not just

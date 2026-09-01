@@ -16,18 +16,38 @@ fn detector_reports_nothing_on_a_closed_port() {
     assert!(!d.is_local_router_running());
 }
 
+#[cfg(not(feature = "embedded"))]
 #[test]
-fn auto_mode_without_a_router_resolves_to_embedded_and_start_is_clean() {
+fn auto_mode_without_a_router_or_embedded_is_clean() {
     let mut cfg = HashMap::new();
     cfg.insert("ra.i2p.samPort".into(), "7699".into()); // nothing there
     let client = I2pClient::from_config(&cfg);
     assert_eq!(client.mode(), Mode::Auto);
-    // No `embedded` feature in the default test build -> start() fails cleanly.
+    // `embedded` feature not built -> start() fails cleanly.
     assert!(!client.start());
     assert!(matches!(
         client.status(),
         Status::Error | Status::Disconnected
     ));
+}
+
+/// Live: `embedded` mode actually boots emissary (reseeds, builds tunnels) and
+/// opens a datagram session. Needs network + several minutes on a cold router.
+/// `cargo test --features embedded -- --ignored embedded_router_starts`
+#[cfg(feature = "embedded")]
+#[test]
+#[ignore]
+fn embedded_router_starts_a_session() {
+    let dir = std::env::temp_dir().join(format!("ra-i2p-it-{}", std::process::id()));
+    let mut cfg = HashMap::new();
+    cfg.insert("ra.i2p.mode".into(), "embedded".into());
+    cfg.insert("ra.i2p.dataDir".into(), dir.display().to_string());
+    let client = I2pClient::from_config(&cfg);
+    assert!(client.start(), "embedded emissary should open a session");
+    assert_eq!(client.status(), Status::Connected);
+    assert!(!client.local_destination().is_empty());
+    client.stop();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

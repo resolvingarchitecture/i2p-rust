@@ -15,10 +15,13 @@ Used as the I2P **protocol service** for
 |------|-----------|
 | `local` | attach to an I2P router already running on this host — needs the SAM bridge enabled (router console → *Clients* → *SAM application bridge*), default `127.0.0.1:7656` |
 | `embedded` | start a pure-Rust I2P router in-process via [emissary](https://github.com/eepnet/emissary) and attach to its SAM bridge — **requires the `embedded` feature** |
-| `auto` *(default)* | `local` if a SAM bridge answers, else `embedded` |
+| `auto` *(default)* | `local` if a SAM bridge answers, else `embedded`; **switches at runtime** — to `embedded` if the local router later disappears, back to `local` when it returns (re-probed at most every 30s, embedded kept warm across flaps) |
 
 The `local`/`embedded`/`auto` split mirrors `i2p-java` and `1m5-android`'s
-`I2P` / `I2PEmbedded` / `I2PLocal`.
+`I2P` / `I2PEmbedded` / `I2PLocal`, and matches
+[`tor-client-rust`](https://github.com/resolvingarchitecture/tor-client-rust)'s
+`ra.tor.mode`. Set `ra.i2p.dataDir` so this node's destination stays stable
+across a `local`↔`embedded` switch.
 
 ## Use
 
@@ -82,5 +85,7 @@ cargo clippy --all-targets
 
 Early. The SAM datagram path (`local` mode) is implemented and unit-tested
 against a fake bridge but **not yet field-tested** against a live router. The
-`embedded` path follows emissary's `docs/embedding-rust.md` recipe. No hidden
-service / streaming, no I2CP. See `DESIGN.md` and `TODO.md`.
+`embedded` path follows emissary's `docs/embedding-rust.md` recipe. Runtime
+`local`↔`embedded` switching (`auto` mode) is implemented but not yet
+field-tested. No hidden service / streaming, no I2CP. See `DESIGN.md` and
+`TODO.md`.

@@ -27,14 +27,36 @@ destination in `envelope.headers["destination"]`.
                                     send/receive repliable datagrams over SAMv3 UDP
     embedded::EmbeddedRouter        (feature "embedded") boots emissary on a Tokio
                                     thread, reseeds, drives the router future
-    I2pClient                       mode resolution, status, destination persistence,
-                                    Envelope <-> datagram
+    I2pClient                       mode resolution, active-backend tracking +
+                                    runtime local<->embedded switching, status,
+                                    destination persistence, Envelope <-> datagram
 
 ## Modes
 
-`Mode { Local, Embedded, Auto }` from `ra.i2p.mode`. `Auto` → `Local` if the SAM
-port answers, else `Embedded`. Same shape as `i2p-java`'s `RouterMode` and
-`1m5-android`'s `I2P`/`I2PEmbedded`/`I2PLocal`.
+`Mode { Local, Embedded, Auto }` from `ra.i2p.mode`. `effective_mode()` resolves
+`Auto` at `start()` → `Local` if the SAM port answers, else `Embedded`. Same
+shape as `i2p-java`'s `RouterMode`, `1m5-android`'s `I2P`/`I2PEmbedded`/
+`I2PLocal`, and `tor-client-rust`'s `ra.tor.mode`.
+
+### Runtime backend switching (auto only)
+
+An `active: AtomicU8` (`None`/`Local`/`Embedded`) tracks which backend the
+current session runs on. At the top of every `send()`, `maybe_switch_backend()`
+re-probes the local SAM port — rate-limited to once per `LOCAL_REPROBE_INTERVAL`
+(30s) via an epoch-millis `AtomicU64`:
+
+- active `Local` + SAM port gone → open a new session against the embedded
+  router (`start_embedded()`, which is idempotent and keeps the router warm).
+- active `Embedded` + SAM port back → open a new session against the local
+  router; the embedded router is left running so a flapping local router
+  doesn't cost repeated reseed/bootstrap. `stop()` drops it.
+
+`current_dest()` feeds the *current* session's full destination into the new
+session (falling back to the persisted/transient value), so this node's address
+survives the switch. Detection is port-probe based, not session-error based:
+outbound is UDP to the SAM forwarder, which does not fail when the router dies.
+The switch shows up to `1m5-core-rust` only as a `NetworkStatus` no-op
+(`Connected` throughout).
 
 ### Embedded (emissary)
 

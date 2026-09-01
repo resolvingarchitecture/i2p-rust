@@ -29,9 +29,9 @@ pub use seda_bus::Envelope;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use log::{info, warn};
 
@@ -88,6 +88,40 @@ fn status_from_u8(v: u8) -> Status {
     }
 }
 
+/// Which backend is currently serving the datagram session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Backend {
+    None,
+    Local,
+    Embedded,
+}
+
+fn backend_to_u8(b: Backend) -> u8 {
+    match b {
+        Backend::None => 0,
+        Backend::Local => 1,
+        Backend::Embedded => 2,
+    }
+}
+fn backend_from_u8(v: u8) -> Backend {
+    match v {
+        1 => Backend::Local,
+        2 => Backend::Embedded,
+        _ => Backend::None,
+    }
+}
+
+/// How often `auto` mode re-checks the local router while it decides whether to
+/// fall back to / recover from the embedded one.
+const LOCAL_REPROBE_INTERVAL: Duration = Duration::from_secs(30);
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// An I2P client. One datagram session; send/receive repliable datagrams.
 pub struct I2pClient {
     detector: LocalRouterDetector,
@@ -96,6 +130,9 @@ pub struct I2pClient {
     data_dir: Option<PathBuf>,
     session_timeout: Duration,
     status: AtomicU8,
+    active: AtomicU8,
+    /// Epoch millis of the last local-router probe (rate-limits `auto` re-probe).
+    last_local_probe: AtomicU64,
     session: Mutex<Option<DatagramSession>>,
     #[cfg(feature = "embedded")]
     embedded: Mutex<Option<embedded::EmbeddedRouter>>,
@@ -110,6 +147,8 @@ impl I2pClient {
             data_dir: None,
             session_timeout: Duration::from_secs(180),
             status: AtomicU8::new(status_to_u8(Status::Disconnected)),
+            active: AtomicU8::new(backend_to_u8(Backend::None)),
+            last_local_probe: AtomicU64::new(0),
             session: Mutex::new(None),
             #[cfg(feature = "embedded")]
             embedded: Mutex::new(None),
@@ -173,10 +212,22 @@ impl I2pClient {
             .unwrap_or_default()
     }
 
-    /// Resolve [`Mode::Auto`] to a concrete mode.
+    fn active(&self) -> Backend {
+        backend_from_u8(self.active.load(Ordering::Acquire))
+    }
+    fn set_active(&self, b: Backend) {
+        self.active.store(backend_to_u8(b), Ordering::Release);
+    }
+
+    fn mark_local_probed(&self) {
+        self.last_local_probe.store(now_millis(), Ordering::Release);
+    }
+
+    /// Resolve [`Mode::Auto`] to a concrete backend for [`start`](Self::start).
     fn effective_mode(&self) -> Mode {
         match self.mode {
             Mode::Auto => {
+                self.mark_local_probed();
                 if self.detector.is_local_router_running() {
                     Mode::Local
                 } else {
@@ -187,36 +238,49 @@ impl I2pClient {
         }
     }
 
-    /// Start the embedded router if needed, open the datagram session. Returns
-    /// `false` cleanly (never panics) if I2P is unavailable.
+    /// Start the selected backend and open the datagram session. Returns `false`
+    /// cleanly (never panics) if I2P is unavailable.
     pub fn start(&self) -> bool {
         self.set_status(Status::Connecting);
 
-        let (sam_tcp, sam_udp) = match self.effective_mode() {
+        match self.effective_mode() {
             Mode::Local => {
                 if !self.detector.is_local_router_running() {
                     warn!(
                         "No I2P SAM bridge on {} - enable it in the router console \
-                         (Clients -> SAM application bridge) or use ra.i2p.mode=embedded.",
+                         (Clients -> SAM application bridge) or use ra.i2p.mode=auto/embedded.",
                         self.detector.sam_tcp_addr()
                     );
                     self.set_status(Status::Disconnected);
                     return false;
                 }
-                (self.detector.sam_tcp_addr(), DEFAULT_SAM_UDP.to_string())
+                self.open_session_on(Backend::Local, true)
             }
-            Mode::Embedded => match self.start_embedded() {
+            Mode::Embedded => self.open_session_on(Backend::Embedded, true),
+            Mode::Auto => unreachable!("resolved by effective_mode"),
+        }
+    }
+
+    /// Resolve SAM addresses for a backend, open a datagram session against it,
+    /// and make it active. `first_start` distinguishes a failed initial start
+    /// (status -> Error) from a failed runtime switch (keep the old session).
+    fn open_session_on(&self, backend: Backend, first_start: bool) -> bool {
+        let (sam_tcp, sam_udp) = match backend {
+            Backend::Local => (self.detector.sam_tcp_addr(), DEFAULT_SAM_UDP.to_string()),
+            Backend::Embedded => match self.start_embedded() {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("embedded I2P router failed to start: {e}");
-                    self.set_status(Status::Error);
+                    if first_start {
+                        self.set_status(Status::Error);
+                    }
                     return false;
                 }
             },
-            Mode::Auto => unreachable!("resolved by effective_mode"),
+            Backend::None => return false,
         };
 
-        let destination = self.load_or_transient_dest();
+        let destination = self.current_dest();
         match DatagramSession::open(
             &sam_tcp,
             &sam_udp,
@@ -227,24 +291,69 @@ impl I2pClient {
             Ok(session) => {
                 self.persist_dest(&session.local_full_dest);
                 info!(
-                    "I2P datagram session open (nickname={}, dest={} chars)",
+                    "I2P datagram session open on {:?} (nickname={}, dest={} chars)",
+                    backend,
                     self.nickname,
                     session.local_dest.len()
                 );
                 *self.session.lock().unwrap() = Some(session);
+                self.set_active(backend);
                 self.set_status(Status::Connected);
                 true
             }
             Err(e) => {
-                warn!("could not open I2P datagram session: {e}");
-                self.set_status(Status::Error);
+                warn!("could not open I2P datagram session on {backend:?}: {e}");
+                if first_start {
+                    self.set_status(Status::Error);
+                }
                 false
             }
         }
     }
 
+    /// The destination to reuse when (re)opening a session: the current
+    /// session's if it has a stable one, else the persisted / transient value.
+    /// Keeps this node's address stable across a local<->embedded switch.
+    fn current_dest(&self) -> String {
+        if let Some(s) = self.session.lock().unwrap().as_ref() {
+            if !s.local_full_dest.is_empty() && s.local_full_dest != "TRANSIENT" {
+                return s.local_full_dest.clone();
+            }
+        }
+        self.load_or_transient_dest()
+    }
+
+    /// `auto` only: rate-limited re-probe of the local router that switches the
+    /// active backend when the situation changes. Called at the top of `send`.
+    fn maybe_switch_backend(&self) {
+        if self.mode != Mode::Auto {
+            return;
+        }
+        let last = self.last_local_probe.load(Ordering::Acquire);
+        if now_millis().saturating_sub(last) < LOCAL_REPROBE_INTERVAL.as_millis() as u64 {
+            return;
+        }
+        self.mark_local_probed();
+        let local_up = self.detector.is_local_router_running();
+        match self.active() {
+            Backend::Local if !local_up => {
+                warn!("local I2P router unreachable; switching to embedded");
+                self.open_session_on(Backend::Embedded, false);
+            }
+            Backend::Embedded if local_up => {
+                info!("local I2P router is back; switching off embedded");
+                self.open_session_on(Backend::Local, false);
+            }
+            _ => {}
+        }
+    }
+
     #[cfg(feature = "embedded")]
     fn start_embedded(&self) -> std::io::Result<(String, String)> {
+        let mut guard = self.embedded.lock().unwrap();
+        if let Some(r) = guard.as_ref() {
+            return Ok((r.sam_tcp_addr(), r.sam_udp_addr())); // keep it warm
+        }
         let base = self
             .data_dir
             .clone()
@@ -252,7 +361,7 @@ impl I2pClient {
             .join("emissary");
         let router = embedded::EmbeddedRouter::start(base)?;
         let addrs = (router.sam_tcp_addr(), router.sam_udp_addr());
-        *self.embedded.lock().unwrap() = Some(router);
+        *guard = Some(router);
         Ok(addrs)
     }
 
@@ -306,6 +415,7 @@ impl I2pClient {
         {
             *self.embedded.lock().unwrap() = None; // Drop shuts the router down
         }
+        self.set_active(Backend::None);
         self.set_status(Status::Disconnected);
         true
     }
@@ -325,6 +435,10 @@ impl I2pClient {
                 .insert("error".into(), "no I2P destination".into());
             return false;
         };
+
+        // auto mode: switch local<->embedded if the local router's state changed.
+        self.maybe_switch_backend();
+
         let guard = self.session.lock().unwrap();
         let Some(session) = guard.as_ref() else {
             envelope
@@ -387,6 +501,13 @@ mod tests {
             Status::Error,
         ] {
             assert_eq!(status_from_u8(status_to_u8(s)), s);
+        }
+    }
+
+    #[test]
+    fn backend_round_trips() {
+        for b in [Backend::None, Backend::Local, Backend::Embedded] {
+            assert_eq!(backend_from_u8(backend_to_u8(b)), b);
         }
     }
 }
