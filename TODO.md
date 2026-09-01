@@ -22,6 +22,18 @@
 
 ## P2 — embedded (emissary)
 - [ ] Field-test the `embedded` feature end to end (reseed → tunnels → send).
+- [ ] **Redox support** — `emissary-util` won't cross-compile to
+      `x86_64-unknown-redox` (`netdev`/`natpmp`/`igd-next` port-mapping deps are
+      unconditional; `netdev` has no Redox impl). Fork `eepnet/emissary` →
+      `resolvingarchitecture/emissary` branch `port-mapping-optional`: add a
+      `port-mapping` feature (in `default`), make those deps `optional`,
+      `#[cfg]`-gate `PortMapper`. Point the git dep at the fork rev with
+      `default-features = false` and no `port-mapping`; submit upstream as a PR.
+      Then clear the next blocker (likely `reqwest`). See
+      `1m5/1m505/docs/redox-build-spike.md` §2.1.
+- [ ] Document the emissary-fork upgrade procedure (rebase on upstream per bump
+      → build Linux + `x86_64-unknown-redox` → live `embedded_*` test → bump
+      rev + CHANGELOG).
 - [ ] Readiness signal: use `EventSubscriber` (or a SAM probe) to report
       `Connecting` → `Connected` when tunnels are actually built, instead of the
       first `SESSION CREATE` blocking.
