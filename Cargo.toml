@@ -13,7 +13,7 @@ categories = ["network-programming"]
 
 [dependencies]
 log = "0.4"
-seda_bus = { path = "../seda-bus-rust" }
+seda_bus = { path = "../../seda-bus/seda-bus-rust" }
 
 # --- embedded router (feature "embedded") ---
 # emissary is a pure-Rust I2P router. Heavy (tokio, reqwest/rustls, dalek);
